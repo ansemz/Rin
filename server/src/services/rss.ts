@@ -4,36 +4,47 @@ import { drizzle } from "drizzle-orm/d1";
 import Elysia from "elysia";
 import { Feed } from "feed";
 import path from 'path';
+import rehypeStringify from "rehype-stringify";
+import remarkGfm from "remark-gfm";
+import remarkParse from "remark-parse";
+import remarkRehype from "remark-rehype";
+import { unified } from "unified";
 import type { Env } from "../db/db";
 import * as schema from "../db/schema";
 import { feeds, users } from "../db/schema";
+import { getEnv } from "../utils/di";
 import { extractImage } from "../utils/image";
 import { createS3Client } from "../utils/s3";
-import remarkGfm from "remark-gfm";
-import { unified } from "unified";
-import remarkParse from "remark-parse";
-import remarkRehype from "remark-rehype";
-import rehypeStringify from "rehype-stringify";
 
-export const RSSService = (env: Env) => {
+export function RSSService() {
+    const env: Env = getEnv();
     const endpoint = env.S3_ENDPOINT;
     const accessHost = env.S3_ACCESS_HOST || endpoint;
     const folder = env.S3_CACHE_FOLDER || 'cache/';
     return new Elysia({ aot: false })
         .get('/sub/:name', async ({ set, params: { name } }) => {
-            if (!accessHost) {
+            const host = `${(accessHost.startsWith("http://") || accessHost.startsWith("https://") ? '' :'https://')}${accessHost}`;
+            if (!host) {
                 set.status = 500;
                 return 'S3_ACCESS_HOST is not defined'
             }
-            if (name === 'rss.xml' || name === 'atom.xml' || name === 'rss.json') {
+            if (name === 'feed.xml') {
+                name = 'rss.xml';
+            }
+            if (['rss.xml', 'atom.xml', 'rss.json'].includes(name)) {
                 const key = path.join(folder, name);
                 try {
-                    const url = `${accessHost}/${key}`;
+                    const url = `${host}/${key}`;
                     console.log(`Fetching ${url}`);
                     const response = await fetch(new Request(url))
+                    const contentType = name === 'rss.xml' ? 'application/rss+xml; charset=UTF-8' : name === 'atom.xml' ? 'application/atom+xml; charset=UTF-8' : 'application/feed+json; charset=UTF-8';
                     return new Response(response.body, {
                         status: response.status,
                         statusText: response.statusText,
+                        headers: {
+                            'Content-Type': contentType,
+                            'Cache-Control': response.headers.get('Cache-Control') || 'public, max-age=3600',
+                        }
                     });
                 } catch (e: any) {
                     console.error(e);
@@ -47,7 +58,7 @@ export const RSSService = (env: Env) => {
 }
 
 export async function rssCrontab(env: Env) {
-    const frontendUrl = env.FRONTEND_URL;
+    const frontendUrl = `${(env.FRONTEND_URL.startsWith("http://") || env.FRONTEND_URL.startsWith("https://") ? '' :'https://')}${env.FRONTEND_URL}`;
     const db = drizzle(env.DB, { schema: schema })
     let title = env.RSS_TITLE;
     const description = env.RSS_DESCRIPTION || "Feed from Rin";
@@ -83,7 +94,7 @@ export async function rssCrontab(env: Env) {
             }
         }
     });
-    for(const f of feed_list) {
+    for (const f of feed_list) {
         const { summary, content, user, ...other } = f;
         const file = await unified()
             .use(remarkParse)
@@ -107,7 +118,7 @@ export async function rssCrontab(env: Env) {
     console.log('save rss.xml to s3');
     const bucket = env.S3_BUCKET;
     const folder = env.S3_CACHE_FOLDER || 'cache/';
-    const s3 = createS3Client(env);
+    const s3 = createS3Client();
     async function save(name: string, data: string) {
         const hashkey = path.join(folder, name);
         try {
